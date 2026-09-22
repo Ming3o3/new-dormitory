@@ -16,3 +16,26 @@ services:
       - .env
     environment:
       - TZ=Asia/Shanghai
+      - ENABLE_SCHEDULER=false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  gotobed-scheduler:
+    image: ${GOTOBED_IMAGE:-gotobed-system:amd64}
+    build:
+      context: ..
+      dockerfile: gotobed-system/Dockerfile
+    container_name: gotobed-system-scheduler
+    restart: unless-stopped
+    volumes:
+      - ${GOTOBED_DATA_DIR:-./gotobed-data}:/app/data
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+      - ENABLE_SCHEDULER=true
+    command: ["python", "-m", "app.scheduler_entry"]

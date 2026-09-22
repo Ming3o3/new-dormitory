@@ -34,18 +34,18 @@ def _close_smtp(smtp):
             pass
 
 
-def _send_via_port(smtp_host, smtp_port, smtp_user, smtp_pass, msg, to_address):
+def _send_via_port(smtp_host, smtp_port, smtp_user, smtp_pass, msg, to_address, timeout=15):
     smtp = None
     stage = 'prepare'
     try:
         if int(smtp_port) == 465:
             stage = 'connect_ssl'
             logger.info('SMTP 阶段=%s, port=%s', stage, smtp_port)
-            smtp = smtplib.SMTP_SSL(smtp_host, 465, timeout=15)
+            smtp = smtplib.SMTP_SSL(smtp_host, 465, timeout=timeout)
         else:
             stage = 'connect_plain'
             logger.info('SMTP 阶段=%s, port=%s', stage, smtp_port)
-            smtp = smtplib.SMTP(smtp_host, int(smtp_port), timeout=15)
+            smtp = smtplib.SMTP(smtp_host, int(smtp_port), timeout=timeout)
             stage = 'starttls'
             logger.info('SMTP 阶段=%s, port=%s', stage, smtp_port)
             smtp.ehlo()
@@ -74,6 +74,7 @@ def send_email(subject: str, content: str, to_address: str):
     smtp_port = current_app.config.get('SMTP_PORT', 465)
     smtp_user = current_app.config.get('SMTP_USER', '')
     smtp_pass = current_app.config.get('SMTP_PASS', '')
+    smtp_timeout = current_app.config.get('SMTP_TIMEOUT', 15)
 
     if not smtp_user or not smtp_pass:
         logger.error(
@@ -99,7 +100,9 @@ def send_email(subject: str, content: str, to_address: str):
 
     last_error = None
     for index, port in enumerate(ports):
-        ok, stage, error = _send_via_port(smtp_host, port, smtp_user, smtp_pass, msg, to_address)
+        ok, stage, error = _send_via_port(
+            smtp_host, port, smtp_user, smtp_pass, msg, to_address, smtp_timeout
+        )
         if ok:
             logger.info('邮件发送成功: to=%s, port=%s, elapsed=%.2fs',
                         to_address, port, time.monotonic() - started)

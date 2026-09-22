@@ -25,7 +25,7 @@ _dns_cache = {}
 _original_getaddrinfo = socket.getaddrinfo
 
 # ---- 请求超时（秒） ----
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = (5, 15)
 
 # 北京时间
 BJT = ZoneInfo('Asia/Shanghai')
@@ -114,16 +114,20 @@ def _login(session, username, password, principal=None, credential=None):
     params = {'uid': ''}
     yzm_url = 'https://ids.gzist.edu.cn/lyuapServer/kaptcha'
     response = session.get(yzm_url, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    uid = response.json()['uid']
+    try:
+        response.raise_for_status()
+        response_data = response.json()
+        uid = response_data['uid']
 
-    yzm = None
-    if 'content' in response.json() and response.json()['content']:
-        yzm_match = re.search('base64,(.*)', response.json()['content'])
-        if yzm_match:
-            yzm_base64 = yzm_match.group(1)
-            yzm = _get_code(yzm_base64)
-            logger.info(f'验证码: {yzm}')
+        yzm = None
+        if response_data.get('content'):
+            yzm_match = re.search('base64,(.*)', response_data['content'])
+            if yzm_match:
+                yzm_base64 = yzm_match.group(1)
+                yzm = _get_code(yzm_base64)
+                logger.info(f'验证码: {yzm}')
+    finally:
+        response.close()
 
     psw = _ctx.call('G5116', username, password, '')
     data = {
@@ -139,8 +143,11 @@ def _login(session, username, password, principal=None, credential=None):
 
     response = session.post('https://ids.gzist.edu.cn/lyuapServer/v1/tickets',
                             data=data, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    login_response = response.json()
+    try:
+        response.raise_for_status()
+        login_response = response.json()
+    finally:
+        response.close()
 
     if 'NOUSER' in login_response:
         raise RuntimeError('账号不存在')
@@ -152,7 +159,7 @@ def _login(session, username, password, principal=None, credential=None):
     logger.info(f'登录响应: {login_response}')
 
     # 二次验证
-    if 'data' in response.json() and response.json()['data']['code'] == 'TWOVERIFY':
+    if 'data' in login_response and login_response['data']['code'] == 'TWOVERIFY':
         if not principal or not credential:
             raise RuntimeError('需要二次验证，但未配置密保问题/答案')
 
@@ -169,14 +176,20 @@ def _login(session, username, password, principal=None, credential=None):
         }
         res = session.post('https://ids.gzist.edu.cn/lyuapServer/login/twoVertify',
                            headers=session.headers, json=json_data, timeout=REQUEST_TIMEOUT)
-        res.raise_for_status()
-        logger.info(f'二次验证响应: {res.json()}')
+        try:
+            res.raise_for_status()
+            logger.info(f'二次验证响应: {res.json()}')
+        finally:
+            res.close()
         response = session.post('https://ids.gzist.edu.cn/lyuapServer/v1/tickets',
                                 data=data, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return response.json()['ticket']
+        try:
+            response.raise_for_status()
+            return response.json()['ticket']
+        finally:
+            response.close()
 
-    return response.json()['ticket']
+    return login_response['ticket']
 
 
 def _update_cookie(session, ticket):
@@ -185,8 +198,11 @@ def _update_cookie(session, ticket):
     response = session.get(
         'https://xsfw.gzist.edu.cn/xsfw/sys/swmzncqapp/*default/index.do',
         params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    session.cookies = response.cookies
+    try:
+        response.raise_for_status()
+        session.cookies = response.cookies
+    finally:
+        response.close()
 
 
 def _do_gotobed(session, username, campus='baiyun'):
@@ -197,9 +213,11 @@ def _do_gotobed(session, username, campus='baiyun'):
     response = session.post(
         'https://xsfw.gzist.edu.cn/xsfw/sys/swpubapp/MobileCommon/getSelRoleConfig.do',
         cookies=session.cookies, data=data, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    _WEU = response.cookies.get('_WEU')
+    try:
+        response.raise_for_status()
+        _WEU = response.cookies.get('_WEU')
+    finally:
+        response.close()
     cookies = {'_WEU': _WEU}
 
 
@@ -211,8 +229,11 @@ def _do_gotobed(session, username, campus='baiyun'):
         role_response = session.post(
             'https://xsfw.gzist.edu.cn/xsfw/sys/swpubapp/MobileCommon/setAppRole.do',
             cookies=cookies, data=role_data, timeout=REQUEST_TIMEOUT)
-        role_response.raise_for_status()
-        logger.info('已设置学生角色')
+        try:
+            role_response.raise_for_status()
+            logger.info('已设置学生角色')
+        finally:
+            role_response.close()
     except Exception as e:
         logger.warning(f'设置角色失败（如果是普通学生则忽略）: {e}')
 
@@ -238,9 +259,8 @@ def _do_gotobed(session, username, campus='baiyun'):
         response = session.post(url, cookies=cookies, data=data_by, timeout=REQUEST_TIMEOUT)
     else:
         raise ValueError(f'不支持的校区配置: {campus}')
-    response.raise_for_status()
-
     try:
+        response.raise_for_status()
         result = response.json()['msg']
         logger.info(f'签到结果: {result}')
         return result
@@ -250,6 +270,8 @@ def _do_gotobed(session, username, campus='baiyun'):
     except Exception as e:
         logger.error(f'签到异常: {e}')
         return '查寝失败'
+    finally:
+        response.close()
 
 
 def run_gotobed(username: str, password: str,
@@ -267,15 +289,15 @@ def run_gotobed(username: str, password: str,
 
     for attempt in range(1, max_attempts + 1):
         try:
-            session = _init_session()
-            ticket = _login(session, username, password, principal, credential)
-            _update_cookie(session, ticket)
-            result = _do_gotobed(session, username, campus)
+            with _init_session() as session:
+                ticket = _login(session, username, password, principal, credential)
+                _update_cookie(session, ticket)
+                result = _do_gotobed(session, username, campus)
 
-            if email:
-                send_gotobed_result(result, email)
+                if email:
+                    send_gotobed_result(result, email)
 
-            return {'status': 'success', 'message': result}
+                return {'status': 'success', 'message': result}
 
         except Exception as e:
             last_error = str(e)

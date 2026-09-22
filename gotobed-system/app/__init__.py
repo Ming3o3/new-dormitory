@@ -1,9 +1,10 @@
 import os
 import logging
+import time
 from datetime import datetime
-from flask import Flask
+from flask import Flask, jsonify
 from flask_login import LoginManager
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
@@ -16,6 +17,65 @@ from .models import db, Account, User, BJT
 
 login_manager = LoginManager()
 logger = logging.getLogger(__name__)
+
+
+def _env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _configure_sqlite(app):
+    """为现有的多进程部署配置 SQLite。"""
+    if not app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:'):
+        return
+
+    engine = db.engine
+
+    @event.listens_for(engine, 'connect')
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute('PRAGMA busy_timeout=5000')
+            cursor.execute('PRAGMA synchronous=NORMAL')
+        finally:
+            cursor.close()
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql('PRAGMA journal_mode=WAL')
+        connection.exec_driver_sql('PRAGMA busy_timeout=5000')
+        connection.exec_driver_sql('PRAGMA synchronous=NORMAL')
+
+
+def _register_health_routes(app):
+    @app.get('/health/live')
+    def health_live():
+        return jsonify({'status': 'ok'})
+
+    @app.get('/health/ready')
+    def health_ready():
+        started = time.monotonic()
+        try:
+            db.session.execute(text('SELECT 1'))
+            latency_ms = round((time.monotonic() - started) * 1000, 2)
+            return jsonify({
+                'status': 'ok',
+                'database': 'ok',
+                'latency_ms': latency_ms,
+            })
+        except Exception as exc:
+            db.session.rollback()
+            logger.exception('健康检查失败')
+            return jsonify({
+                'status': 'degraded',
+                'database': 'error',
+                'error': type(exc).__name__,
+            }), 503
+
+    @app.get('/health')
+    def health():
+        return health_ready()
 
 
 def create_app():
@@ -33,13 +93,21 @@ def create_app():
         'DATABASE_URL', 'sqlite:///' + os.path.join(data_dir, 'gotobed.db')
     )
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'connect_args': {
+            'timeout': float(os.environ.get('SQLITE_BUSY_TIMEOUT', '5')),
+            'check_same_thread': False,
+        },
+    }
     app.config['ADMIN_PASSWORD'] = os.environ.get('ADMIN_PASSWORD', 'admin123')
     app.config['ADMIN_EMAIL'] = os.environ.get('ADMIN_EMAIL', os.environ.get('SMTP_USER', ''))
     app.config['FERNET_KEY'] = os.environ.get('FERNET_KEY', '')
     app.config['SMTP_HOST'] = os.environ.get('SMTP_HOST', 'smtp.qq.com')
     app.config['SMTP_PORT'] = int(os.environ.get('SMTP_PORT', '465'))
+    app.config['SMTP_TIMEOUT'] = float(os.environ.get('SMTP_TIMEOUT', '15'))
     app.config['SMTP_USER'] = os.environ.get('SMTP_USER', '')
     app.config['SMTP_PASS'] = os.environ.get('SMTP_PASS', '')
+    app.config['ENABLE_SCHEDULER'] = _env_bool('ENABLE_SCHEDULER', False)
     logger.info(
         'SMTP 配置已加载: host=%s, port=%s, user=%s, pass=%s',
         app.config['SMTP_HOST'], app.config['SMTP_PORT'],
@@ -55,16 +123,28 @@ def create_app():
     # 注册蓝图
     from .routes import register_blueprints
     register_blueprints(app)
+    _register_health_routes(app)
+
+    @app.teardown_appcontext
+    def _cleanup_db_session(exception=None):
+        if exception is not None:
+            db.session.rollback()
+        db.session.remove()
 
     # 创建数据库表
     with app.app_context():
+        _configure_sqlite(app)
         db.create_all()
         _upgrade_legacy_schema()
         _ensure_admin_account(app)
 
-    # 初始化调度器（需在建表之后）
-    from .scheduler import init_scheduler
-    init_scheduler(app)
+    # 调度器只在独立的单实例服务中运行，避免多个 Gunicorn Worker
+    # 重复创建定时任务。
+    if app.config['ENABLE_SCHEDULER']:
+        from .scheduler import init_scheduler
+        init_scheduler(app)
+    else:
+        logger.info('调度器未启用：当前进程仅提供 Web/API 服务')
 
     return app
 
