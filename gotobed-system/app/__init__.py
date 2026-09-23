@@ -1,10 +1,13 @@
 import os
 import logging
 import time
+from contextlib import contextmanager
 from datetime import datetime
+import fcntl
 from flask import Flask, jsonify
 from flask_login import LoginManager
 from sqlalchemy import event, inspect, text
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
@@ -46,6 +49,18 @@ def _configure_sqlite(app):
         connection.exec_driver_sql('PRAGMA journal_mode=WAL')
         connection.exec_driver_sql('PRAGMA busy_timeout=5000')
         connection.exec_driver_sql('PRAGMA synchronous=NORMAL')
+
+
+@contextmanager
+def _startup_lock(data_dir):
+    """在多个 Worker 和容器之间串行执行数据库初始化。"""
+    lock_path = os.path.join(data_dir, '.startup.lock')
+    with open(lock_path, 'a+') as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _register_health_routes(app):
@@ -132,11 +147,12 @@ def create_app():
         db.session.remove()
 
     # 创建数据库表
-    with app.app_context():
-        _configure_sqlite(app)
-        db.create_all()
-        _upgrade_legacy_schema()
-        _ensure_admin_account(app)
+    with _startup_lock(data_dir):
+        with app.app_context():
+            _configure_sqlite(app)
+            db.create_all()
+            _upgrade_legacy_schema()
+            _ensure_admin_account(app)
 
     # 调度器只在独立的单实例服务中运行，避免多个 Gunicorn Worker
     # 重复创建定时任务。
@@ -190,7 +206,15 @@ def _ensure_admin_account(app):
             enabled=True,
         )
         db.session.add(admin)
-        db.session.flush()
+        try:
+            db.session.flush()
+        except IntegrityError:
+            # Gunicorn Worker 和 scheduler 进程可能同时初始化。
+            # 查询完成后，其他进程可能已经创建了同一个管理员账号。
+            db.session.rollback()
+            admin = Account.query.filter_by(email=admin_email).first()
+            if not admin:
+                raise
     else:
         # 当前项目暂无独立的修改管理员密码页面，配置文件中的密码作为管理员密码来源。
         # 这样用户修改 .env 后重启服务即可生效，不会继续使用旧的密码哈希。

@@ -1,8 +1,30 @@
-# Secrets and runtime state are injected or mounted at runtime.
+.git/
+.gitignore
+.DS_Store
+**/.DS_Store
+
+# 本地密钥和运行时数据不得进入镜像层。
+**/.env
+**/.env.*
+!**/.env.example
 gotobed-system/.env
 gotobed-system/.venv/
 gotobed-system/data/
+**/data/
+**/gotobed-data/
+**/*.db
+**/*.db-shm
+**/*.db-wal
 **/__pycache__/
 **/*.pyc
-.git/
-.DS_Store
+
+# 本地开发产物。
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+
+# 导出的镜像和文档不是构建输入。
+docs/image/
+**/*.tar
+**/*.tar.gz
