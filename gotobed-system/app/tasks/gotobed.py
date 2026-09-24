@@ -25,7 +25,8 @@ _dns_cache = {}
 _original_getaddrinfo = socket.getaddrinfo
 
 # ---- 请求超时（秒） ----
-REQUEST_TIMEOUT = (5, 15)
+# 学工平台响应较慢，保持旧版的 30 秒超时，避免服务器误判为失败。
+REQUEST_TIMEOUT = 30
 
 # 北京时间
 BJT = ZoneInfo('Asia/Shanghai')
@@ -220,22 +221,6 @@ def _do_gotobed(session, username, campus='baiyun'):
         response.close()
     cookies = {'_WEU': _WEU}
 
-
-    # 为班干部设置学生角色（普通学生此步骤也兼容，不会报错）
-    role_data = {
-        'data': '{"APPID":"5405362541914944","APPNAME":"swmzncqapp","ROLEID":"3c787fd4aa2041809be43821422c7995"}'
-    }
-    try:
-        role_response = session.post(
-            'https://xsfw.gzist.edu.cn/xsfw/sys/swpubapp/MobileCommon/setAppRole.do',
-            cookies=cookies, data=role_data, timeout=REQUEST_TIMEOUT)
-        try:
-            role_response.raise_for_status()
-            logger.info('已设置学生角色')
-        finally:
-            role_response.close()
-    except Exception as e:
-        logger.warning(f'设置角色失败（如果是普通学生则忽略）: {e}')
 
     data_by = {
         'data': '{"SFFWN":"1","DDDM":"134D3343A40D51AFE0630717000A7549",'
