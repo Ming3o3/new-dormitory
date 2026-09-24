@@ -221,6 +221,22 @@ def _do_gotobed(session, username, campus='baiyun'):
         response.close()
     cookies = {'_WEU': _WEU}
 
+    # 管理员账号需要切换为学生角色，普通学生账号失败时继续执行签到。
+    role_data = {
+        'data': '{"APPID":"5405362541914944","APPNAME":"swmzncqapp","ROLEID":"3c787fd4aa2041809be43821422c7995"}'
+    }
+    try:
+        role_response = session.post(
+            'https://xsfw.gzist.edu.cn/xsfw/sys/swpubapp/MobileCommon/setAppRole.do',
+            cookies=cookies, data=role_data, timeout=REQUEST_TIMEOUT)
+        try:
+            role_response.raise_for_status()
+            logger.info('已设置学生角色')
+        finally:
+            role_response.close()
+    except Exception as e:
+        logger.warning(f'设置学生角色失败（普通学生账号可忽略）: {e}')
+
 
     data_by = {
         'data': '{"SFFWN":"1","DDDM":"134D3343A40D51AFE0630717000A7549",'
