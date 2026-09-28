@@ -134,10 +134,10 @@ def send_verification_code(to_address: str, code: str, purpose: str):
     return send_email(subject, content, to_address)
 
 
-def send_gotobed_result(content: str, to_address: str):
+def send_gotobed_result(content: str, to_address: str) -> bool:
     """发送查寝结果通知"""
     formatted_date = get_beijing_time()
     result_status = '✅成功' if '成功' in content else '❌失败'
     subject = f'查寝 {result_status} {formatted_date}'
     body = f'签到结果：{content}'
-    send_email(subject, body, to_address)
+    return send_email(subject, body, to_address)

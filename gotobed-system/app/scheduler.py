@@ -60,7 +60,9 @@ def _execute_gotobed(user_id: int):
         }
         db.session.remove()
 
-    result = run_gotobed(**task_input)
+        # APScheduler 在线程中执行，不会自动继承 Flask 上下文。
+        # 查寝过程可能发送邮件，因此必须在这个上下文内调用任务。
+        result = run_gotobed(**task_input)
 
     with _app.app_context():
         log = Log(

@@ -287,6 +287,7 @@ def run_gotobed(username: str, password: str,
 
     max_attempts = 5
     last_error = None
+    checkin_succeeded = False
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -294,11 +295,9 @@ def run_gotobed(username: str, password: str,
                 ticket = _login(session, username, password, principal, credential)
                 _update_cookie(session, ticket)
                 result = _do_gotobed(session, username, campus)
-
-                if email:
-                    send_gotobed_result(result, email)
-
-                return {'status': 'success', 'message': result}
+            # 邮件发送放在重试循环外，避免“邮件失败”导致重复查寝。
+            checkin_succeeded = True
+            break
 
         except Exception as e:
             last_error = str(e)
@@ -308,8 +307,25 @@ def run_gotobed(username: str, password: str,
                 logger.info(f'等待 {wait:.1f} 秒后重试...')
                 time.sleep(wait)
 
+    if checkin_succeeded:
+        # 查寝成功后只发送一次通知；邮件异常不会进入查寝重试逻辑。
+        if email:
+            try:
+                sent = send_gotobed_result(result, email)
+                if not sent:
+                    logger.error('查寝成功通知邮件发送失败: to=%s', email)
+            except Exception:
+                logger.exception('查寝成功通知邮件发送异常: to=%s', email)
+        return {'status': 'success', 'message': result}
+
+    # 能走到这里说明所有查寝尝试都失败，通知失败也不能覆盖原始错误。
     error_msg = f'连续{max_attempts}次执行失败: {last_error}'
     logger.error(error_msg)
     if email:
-        send_gotobed_result(error_msg, email)
+        try:
+            sent = send_gotobed_result(error_msg, email)
+            if not sent:
+                logger.error('查寝失败通知邮件发送失败: to=%s', email)
+        except Exception:
+            logger.exception('查寝失败通知邮件发送异常: to=%s', email)
     return {'status': 'failure', 'message': error_msg}
