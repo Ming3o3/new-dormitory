@@ -7,6 +7,11 @@ services:
       dockerfile: gotobed-system/Dockerfile
     container_name: gotobed-system
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "5000:5000"
     volumes:
@@ -31,6 +36,11 @@ services:
       dockerfile: gotobed-system/Dockerfile
     container_name: gotobed-system-scheduler
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ${GOTOBED_DATA_DIR:-./gotobed-data}:/app/data
     env_file:

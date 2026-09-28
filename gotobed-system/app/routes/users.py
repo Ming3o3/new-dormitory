@@ -42,6 +42,15 @@ def _validate_cron_time(expr: str) -> bool:
     return 0 <= minute <= 59 and 0 <= hour <= 23
 
 
+def _cron_time_sort_key(expr: str):
+    """按小时和分钟排序，保证同一组时间生成稳定的任务顺序。"""
+    fields = expr.split()
+    try:
+        return int(fields[1]), int(fields[0]), expr
+    except (IndexError, ValueError):
+        return 99, 99, expr
+
+
 def _parse_cron_times(form) -> list:
     """从表单解析所有打卡时间（预设 + 自定义）"""
     times = form.getlist('cron_times')
@@ -60,7 +69,7 @@ def _parse_cron_times(form) -> list:
         if t not in seen and _validate_cron_time(t):
             valid.append(t)
             seen.add(t)
-    return valid
+    return sorted(valid, key=_cron_time_sort_key)
 
 
 def _managed_user_count():

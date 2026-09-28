@@ -1,5 +1,6 @@
 import logging
 import os
+from threading import RLock
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -24,6 +25,8 @@ scheduler = BackgroundScheduler(
     },
 )
 _jobs = {}  # user_id -> [job_id1, job_id2, ...]  一个用户可有多个定时任务
+_job_specs = {}  # job_id -> (user_id, cron_expr)，用于避免重复替换未变化的任务
+_job_lock = RLock()
 _app = None  # 保存 app 引用
 _scheduler_enabled = False
 
@@ -86,49 +89,116 @@ def _cleanup_old_logs():
             logger.info(f'已清理 {count} 条过期日志（{cutoff.strftime("%Y-%m-%d %H:%M")} 之前）')
 
 
+def _cron_sort_key(cron_expr):
+    """按小时和分钟排序 cron，避免表单顺序变化导致任务 ID 变化。"""
+    fields = cron_expr.split()
+    try:
+        return int(fields[1]), int(fields[0]), cron_expr
+    except (IndexError, ValueError):
+        return 99, 99, cron_expr
+
+
+def _normalized_cron_times(user):
+    """规范化用户的 cron 列表：去空白、去重并按时间排序。"""
+    unique = {
+        ' '.join(str(expr).split())
+        for expr in user.get_cron_times()
+        if str(expr).strip()
+    }
+    return sorted(unique, key=_cron_sort_key)
+
+
+def _sync_user_jobs(user):
+    """按用户配置增量同步任务，返回新增、修改、保持不变的数量。"""
+    desired = {}
+    for idx, cron_expr in enumerate(_normalized_cron_times(user)):
+        job_id = f'gotobed_{user.id}_{idx}'
+        try:
+            desired[job_id] = (
+                (user.id, cron_expr),
+                CronTrigger.from_crontab(cron_expr, timezone='Asia/Shanghai'),
+            )
+        except Exception as exc:
+            logger.error('添加调度失败: 用户 %s, cron=%s, 错误: %s', user.username, cron_expr, exc)
+
+    job_ids = []
+    added = changed = unchanged = 0
+    with _job_lock:
+        prefix = f'gotobed_{user.id}_'
+        previous_ids = set(_jobs.get(user.id, []))
+        previous_ids.update(
+            job.id for job in scheduler.get_jobs() if job.id.startswith(prefix)
+        )
+        for job_id, (spec, trigger) in desired.items():
+            current_job = scheduler.get_job(job_id)
+            current_spec = _job_specs.get(job_id)
+            if current_job is None:
+                scheduler.add_job(
+                    _execute_gotobed,
+                    trigger=trigger,
+                    args=[user.id],
+                    id=job_id,
+                    max_instances=1,
+                )
+                added += 1
+                logger.info('已添加调度: 用户 %s, cron=%s', user.username, spec[1])
+            elif current_spec != spec:
+                scheduler.reschedule_job(job_id, trigger=trigger)
+                changed += 1
+                logger.info('已更新调度: 用户 %s, cron=%s', user.username, spec[1])
+            else:
+                unchanged += 1
+            _job_specs[job_id] = spec
+            job_ids.append(job_id)
+
+        # 用户减少时间或删除账号时，清理该用户不再需要的任务。
+        for job_id in previous_ids - set(job_ids):
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
+            _job_specs.pop(job_id, None)
+            logger.info('已移除失效调度: %s', job_id)
+
+        _jobs[user.id] = job_ids
+    return added, changed, unchanged
+
+
 def add_user_job(user):
-    """为用户添加调度任务（支持多个时间）"""
+    """按用户配置增量添加或更新调度任务（支持多个时间）。"""
     if not _scheduler_enabled:
         logger.debug('调度器未启用，跳过用户任务更新: user_id=%s', user.id)
         return
-    job_ids = []
-    for idx, cron_expr in enumerate(user.get_cron_times()):
-        job_id = f'gotobed_{user.id}_{idx}'
-        try:
-            trigger = CronTrigger.from_crontab(cron_expr, timezone='Asia/Shanghai')
-            scheduler.add_job(
-                _execute_gotobed,
-                trigger=trigger,
-                args=[user.id],
-                id=job_id,
-                replace_existing=True,
-                max_instances=1,
-            )
-            job_ids.append(job_id)
-            logger.info(f'已添加调度: 用户 {user.username}, cron={cron_expr}')
-        except Exception as e:
-            logger.error(f'添加调度失败: 用户 {user.username}, cron={cron_expr}, 错误: {e}')
-    _jobs[user.id] = job_ids
+    _sync_user_jobs(user)
 
 
 def remove_user_job(user_id: int):
     """移除用户的所有调度任务"""
     if not _scheduler_enabled:
         return
-    job_ids = _jobs.pop(user_id, [])
-    for job_id in job_ids:
-        try:
-            scheduler.remove_job(job_id)
-            logger.info(f'已移除调度: {job_id}')
-        except Exception:
-            pass
+    with _job_lock:
+        prefix = f'gotobed_{user_id}_'
+        job_ids = set(_jobs.pop(user_id, []))
+        job_ids.update(
+            job.id for job in scheduler.get_jobs() if job.id.startswith(prefix)
+        )
+        for job_id in job_ids:
+            try:
+                scheduler.remove_job(job_id)
+                logger.info('已移除调度: %s', job_id)
+            except Exception:
+                pass
+            _job_specs.pop(job_id, None)
 
 
 def update_user_job(user):
-    """更新用户的调度任务（删除旧的，添加新的）"""
-    remove_user_job(user.id)
+    """按用户最新配置增量更新调度任务。"""
+    if not _scheduler_enabled:
+        return
     if user.enabled:
-        add_user_job(user)
+        _sync_user_jobs(user)
+    else:
+        remove_user_job(user.id)
 
 
 def sync_jobs():
@@ -141,17 +211,37 @@ def sync_jobs():
     with _app.app_context():
         enabled_users = User.query.filter_by(enabled=True).all()
         desired_ids = set()
+        added = changed = unchanged = 0
         for user in enabled_users:
-            desired_ids.update(
-                f'gotobed_{user.id}_{idx}'
-                for idx, _cron_expr in enumerate(user.get_cron_times())
-            )
-            add_user_job(user)
+            user_added, user_changed, user_unchanged = _sync_user_jobs(user)
+            added += user_added
+            changed += user_changed
+            unchanged += user_unchanged
+            desired_ids.update(_jobs.get(user.id, []))
 
-        for job in scheduler.get_jobs():
-            if job.id.startswith('gotobed_') and job.id not in desired_ids:
+        with _job_lock:
+            stale_jobs = [
+                job for job in scheduler.get_jobs()
+                if job.id.startswith('gotobed_') and job.id not in desired_ids
+            ]
+            for job in stale_jobs:
                 scheduler.remove_job(job.id)
+                _job_specs.pop(job.id, None)
                 logger.info('已移除失效调度: %s', job.id)
+                _jobs.pop(_user_id_from_job_id(job.id), None)
+
+        logger.info(
+            '调度同步完成：新增 %s 个，修改 %s 个，删除 %s 个，保持不变 %s 个',
+            added, changed, len(stale_jobs), unchanged,
+        )
+
+
+def _user_id_from_job_id(job_id):
+    """从任务 ID 中解析用户 ID，仅用于清理缓存。"""
+    try:
+        return int(job_id.removeprefix('gotobed_').rsplit('_', 1)[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def init_scheduler(app):
